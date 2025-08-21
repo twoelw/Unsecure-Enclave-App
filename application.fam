@@ -1,0 +1,12 @@
+App(
+    appid="unsecure_enclave",
+    name="Unsecure Enclave",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="unsecure_enclave_app",
+    stack_size=4 * 1024,
+    fap_category="Tools",
+    fap_author="2elw",
+    fap_icon="unsecure_enclave.png",
+    fap_version="0.1.0",
+    fap_description="Manage unsecure file-backed enclave slots",
+)
