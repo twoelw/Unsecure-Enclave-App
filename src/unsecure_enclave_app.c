@@ -2,19 +2,88 @@
 #include <furi_hal.h>
 #include <furi_hal_random.h>
 #include <gui/gui.h>
+#include <gui/elements.h>
 
 #define UE_SLOT_PATH_FMT UE_DIR "/slot_%03u.bin"
 
 typedef enum {
+    UeSceneStart,
     UeSceneMenu,
     UeSceneSlotMenu,
     UeSceneView,
     UeSceneNum,
 } UeSceneId;
 
+typedef struct {
+    uint8_t remaining;
+    bool enabled;
+} StartModel;
+
 static void ue_menu_cb(void* ctx, uint32_t index) {
     UnsecureEnclaveApp* app = ctx;
     view_dispatcher_send_custom_event(app->view_dispatcher, index);
+}
+
+// START VIEW
+static void ue_start_timer_cb(void* ctx) {
+    UnsecureEnclaveApp* app = ctx;
+    if(!app || !app->start_view) return;
+    StartModel* model = view_get_model(app->start_view);
+    if(model->enabled) {
+        // nothing to do
+        view_commit_model(app->start_view, false);
+        return;
+    }
+    if(model->remaining > 0) {
+        model->remaining--;
+        if(model->remaining == 0) model->enabled = true;
+    }
+    // trigger redraw
+    view_commit_model(app->start_view, true);
+}
+
+static void ue_start_view_draw(Canvas* canvas, void* ctx) {
+    StartModel* model = ctx;
+    canvas_clear(canvas);
+    // Background warning text
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 38, 8, "WARNING");
+
+    // Tagline lines
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(canvas, 21, 16, "It is called 'UN'secure");
+    canvas_draw_str(canvas, 23, 24, "enclave for a reason");
+
+    // Divider
+    canvas_draw_line(canvas, 0, 26, 127, 26);
+
+    // Details
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 4, 38, "ALL KEYS ARE STORED");
+    canvas_draw_str(canvas, 8, 50, "IN PLAINTEXT IN /INT");
+
+    // Bottom action hint
+    char btn[32];
+    if(model->enabled) {
+        snprintf(btn, sizeof(btn), "I understand");
+    } else {
+        snprintf(btn, sizeof(btn), "(%u)", (unsigned)model->remaining);
+    }
+    elements_button_center(canvas, btn);
+}
+
+static bool ue_start_view_input(InputEvent* event, void* ctx) {
+    UnsecureEnclaveApp* app = ctx;
+    if(event->type == InputTypeShort && event->key == InputKeyOk) {
+        StartModel* model = view_get_model(app->start_view);
+        bool can_continue = model->enabled;
+        view_commit_model(app->start_view, false);
+        if(can_continue) {
+            scene_manager_next_scene(app->scene_manager, UeSceneMenu);
+            return true;
+        }
+    }
+    return false;
 }
 
 static void ue_slot_menu_enter(void* ctx) {
@@ -61,6 +130,21 @@ static void ue_scene_menu_on_enter(void* ctx) {
     ue_build_slot_list(app);
     variable_item_list_set_enter_callback(app->varlist, ue_varlist_enter_cb, app);
     view_dispatcher_switch_to_view(app->view_dispatcher, UeViewVarList);
+}
+
+static void ue_scene_start_on_enter(void* ctx) {
+    UnsecureEnclaveApp* app = ctx;
+    // Initialize model
+    StartModel* model = view_get_model(app->start_view);
+    model->remaining = 10;
+    model->enabled = false;
+    view_commit_model(app->start_view, true);
+    // Ensure timer exists and start it
+    if(!app->start_timer) {
+        app->start_timer = furi_timer_alloc(ue_start_timer_cb, FuriTimerTypePeriodic, app);
+    }
+    furi_timer_start(app->start_timer, furi_ms_to_ticks(1000));
+    view_dispatcher_switch_to_view(app->view_dispatcher, UeViewStart);
 }
 
 static bool ue_read_slot(UnsecureEnclaveApp* app, FuriString* out) {
@@ -170,9 +254,24 @@ static bool ue_scene_menu_on_event(void* ctx, SceneManagerEvent ev) {
     return false;
 }
 
+static bool ue_scene_start_on_event(void* ctx, SceneManagerEvent ev) {
+    UnsecureEnclaveApp* app = ctx;
+    if(ev.type == SceneManagerEventTypeBack) {
+        scene_manager_stop(app->scene_manager);
+        view_dispatcher_stop(app->view_dispatcher);
+        return true;
+    }
+    return false;
+}
+
 static void ue_scene_menu_on_exit(void* ctx) {
     UnsecureEnclaveApp* app = ctx;
     variable_item_list_reset(app->varlist);
+}
+
+static void ue_scene_start_on_exit(void* ctx) {
+    UnsecureEnclaveApp* app = ctx;
+    if(app->start_timer) furi_timer_stop(app->start_timer);
 }
 
 static void ue_scene_slot_menu_on_enter(void* ctx) {
@@ -202,18 +301,21 @@ static bool ue_scene_view_on_event(void* ctx, SceneManagerEvent ev) {
 
 // Scene handlers arrays must match SceneManagerHandlers definition
 static void (*const ue_on_enter[])(void*) = {
+    ue_scene_start_on_enter,
     ue_scene_menu_on_enter,
     ue_scene_slot_menu_on_enter,
     ue_scene_view_on_enter,
 };
 
 static bool (*const ue_on_event[])(void*, SceneManagerEvent) = {
+    ue_scene_start_on_event,
     ue_scene_menu_on_event,
     ue_scene_slot_menu_on_event,
     ue_scene_view_on_event,
 };
 
 static void (*const ue_on_exit[])(void*) = {
+    ue_scene_start_on_exit,
     ue_scene_menu_on_exit,
     ue_scene_slot_menu_on_exit,
     ue_scene_view_on_exit,
@@ -238,6 +340,13 @@ UnsecureEnclaveApp* unsecure_enclave_app_alloc(void) {
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, ue_cust_cb);
     view_dispatcher_set_navigation_event_callback(app->view_dispatcher, ue_nav_cb);
 
+    app->start_view = view_alloc();
+    view_allocate_model(app->start_view, ViewModelTypeLocking, sizeof(StartModel));
+    view_set_context(app->start_view, app);
+    view_set_draw_callback(app->start_view, ue_start_view_draw);
+    view_set_input_callback(app->start_view, ue_start_view_input);
+    view_dispatcher_add_view(app->view_dispatcher, UeViewStart, app->start_view);
+
     app->varlist = variable_item_list_alloc();
     view_dispatcher_add_view(app->view_dispatcher, UeViewVarList, variable_item_list_get_view(app->varlist));
 
@@ -246,6 +355,8 @@ UnsecureEnclaveApp* unsecure_enclave_app_alloc(void) {
 
     app->textbox = text_box_alloc();
     view_dispatcher_add_view(app->view_dispatcher, UeViewText, text_box_get_view(app->textbox));
+
+    app->start_timer = NULL;
 
     return app;
 }
@@ -262,12 +373,17 @@ void unsecure_enclave_app_free(UnsecureEnclaveApp* app) {
     view_dispatcher_remove_view(app->view_dispatcher, UeViewText);
     text_box_free(app->textbox);
 
+    view_dispatcher_remove_view(app->view_dispatcher, UeViewStart);
+    view_free(app->start_view);
+
     scene_manager_free(app->scene_manager);
 
     view_dispatcher_free(app->view_dispatcher);
 
     furi_record_close(RECORD_STORAGE);
     furi_string_free(app->view_text);
+
+    if(app->start_timer) furi_timer_free(app->start_timer);
 
     free(app);
 }
@@ -279,7 +395,7 @@ int32_t unsecure_enclave_app(void* p) {
     Gui* gui = furi_record_open(RECORD_GUI);
     view_dispatcher_attach_to_gui(app->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
 
-    scene_manager_next_scene(app->scene_manager, UeSceneMenu);
+    scene_manager_next_scene(app->scene_manager, UeSceneStart);
 
     view_dispatcher_run(app->view_dispatcher);
 

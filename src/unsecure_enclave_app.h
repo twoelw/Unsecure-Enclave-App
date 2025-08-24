@@ -11,6 +11,7 @@
 #define UE_DIR INT_PATH("enclave")
 
 typedef enum {
+    UeViewStart,
     UeViewSubmenu,
     UeViewVarList,
     UeViewText,
@@ -20,6 +21,7 @@ typedef struct {
     ViewDispatcher* view_dispatcher;
     SceneManager* scene_manager;
 
+    View* start_view;
     Submenu* submenu;
     VariableItemList* varlist;
     TextBox* textbox;
@@ -29,6 +31,11 @@ typedef struct {
 
     // state
     uint8_t selected_slot;
+
+    // start screen state
+    FuriTimer* start_timer;
+    uint8_t start_countdown;
+    bool start_ready;
 } UnsecureEnclaveApp;
 
 UnsecureEnclaveApp* unsecure_enclave_app_alloc(void);
